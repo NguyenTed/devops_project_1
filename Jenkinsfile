@@ -1,10 +1,15 @@
 pipeline {
     agent any
-    
+
     tools {
-        maven 'Maven 3' // Use Jenkins' built-in Maven
+        maven 'Maven 3'
     }
-    
+
+    environment {
+        DOCKERHUB_USER = 'thuannguyen2905'
+        DOCKER_CREDENTIALS_ID = 'docker-hub-credentials'
+    }
+
     stages {
         stage('Clean Workspace') {
             steps {
@@ -16,12 +21,13 @@ pipeline {
             steps {
                 script {
                     def services = [
-                            "spring-petclinic-customers-service",
-                            "spring-petclinic-vets-service",
-                            "spring-petclinic-visits-service",
-                            "spring-petclinic-genai-service"]
-                    
-                    def baseCommit = sh(script: "git rev-parse HEAD^1", returnStdout: true).trim() // First parent of merge commit
+                        "spring-petclinic-customers-service",
+                        "spring-petclinic-vets-service",
+                        "spring-petclinic-visits-service",
+                        "spring-petclinic-genai-service"
+                    ]
+
+                    def baseCommit = sh(script: "git rev-parse HEAD^1", returnStdout: true).trim()
                     def changedFiles = sh(script: "git diff --name-only ${baseCommit} HEAD", returnStdout: true).trim().split("\n")
                     echo "Changed files: ${changedFiles.join(', ')}"
 
@@ -32,7 +38,7 @@ pipeline {
                         }
                     }
                     echo "Code changes in services: ${changedServices.join(', ')}"
-                    env.CHANGED_SERVICES = changedServices.join(', ')                             
+                    env.CHANGED_SERVICES = changedServices.join(', ')
                 }
             }
         }
@@ -46,27 +52,16 @@ pipeline {
                     def changedServices = env.CHANGED_SERVICES.split(',')
                     changedServices.each { service -> 
                         echo "Testing service: ${service}"
-                        dir("${env.WORKSPACE}/${service}") {  // Use absolute workspace path
-                            sh "ls -l"  // Debugging: Check if pom.xml exists
+                        dir("${env.WORKSPACE}/${service}") {
                             sh "mvn clean test surefire-report:report jacoco:report"
-                            
-                            // Display test results
                             sh "cat target/surefire-reports/*.txt || true"
-
-                            // Publish JUnit test results
                             junit '**/target/surefire-reports/*.xml'
-
-                            // Record test coverage
                             recordCoverage(
                                 tools: [[parser: 'JACOCO', pattern: '**/target/site/jacoco/jacoco.xml']],
                                 qualityGates: [
                                     [threshold: 70.0, metric: 'LINE', baseline: 'PROJECT', unstable: false]
                                 ]
                             )
-
-                            // Ensure tests don't fail due to missing files
-                            echo "Current build result: ${currentBuild.result}"
-
                             if (currentBuild.result == 'UNSTABLE' || currentBuild.result == 'FAILURE') {
                                 error "Test stage failed due to test failures!"
                             }
@@ -92,8 +87,41 @@ pipeline {
                 }
             }
         }
+
+        stage('Build and Push Docker Images') {
+            when {
+                expression { env.CHANGED_SERVICES != '' }
+            }
+            steps {
+                script {
+                    def commitId = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+                    def changedServices = env.CHANGED_SERVICES.split(',')
+
+                    withCredentials([usernamePassword(credentialsId: DOCKER_CREDENTIALS_ID, usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+                        sh 'echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin'
+
+                        changedServices.each { service ->
+                            def shortName = service.replace('spring-petclinic-', '')
+                            def imageName = "${DOCKERHUB_USER}/${shortName}:${commitId}"
+
+                            echo "Building Docker image: ${imageName}"
+
+                            dir(service) {
+                                sh """
+                                    docker build -t ${imageName} .
+                                    docker push ${imageName}
+                                """
+                            }
+                        }
+
+                        // Optional: Logout after push
+                        sh "docker logout"
+                    }
+                }
+            }
+        }
     }
-    
+
     post {
         always {
             echo "Pipeline execution completed!"
